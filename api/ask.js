@@ -1,4 +1,4 @@
-// api/ask.js — continuity (optional Redis) + dynamic-entity hybrid RAG + strict fallback + resilient Gemini retries
+// api/ask.js — contact intent (instant reply) + optional Redis + dynamic-entity hybrid RAG + strict fallback + resilient Gemini retries
 import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -15,6 +15,12 @@ const MIN_OK_SCORE     = parseFloat(process.env.MIN_OK_SCORE || "0.16");
 
 const BOT_NAME        = process.env.BOT_NAME || "Duki";
 const FRONTEND_GREETS = (process.env.FRONTEND_GREETS ?? "true") !== "false";
+
+// Contact fallbacks (used if KB doesn’t contain them)
+const CONTACT_WHATSAPP = process.env.CONTACT_WHATSAPP || "+91 9350513789";
+const CONTACT_EMAIL    = process.env.CONTACT_EMAIL    || "Embroidery@grouphca.com";
+const CONTACT_PHONE    = process.env.CONTACT_PHONE    || "+91 9350513789";
+const CONTACT_HO_ADDR  = process.env.CONTACT_HO_ADDR  || "Head Office: HCA, New Delhi, India";
 
 if (!process.env.GOOGLE_API_KEY) throw new Error("Missing GOOGLE_API_KEY env on Vercel");
 
@@ -102,6 +108,92 @@ function loadVectors() {
   return raw.vectors;
 }
 let VECTORS=[]; try{ VECTORS = loadVectors(); }catch(e){ console.warn(e.message); }
+
+/* ───────── KB Contact Extraction (once at cold start) ───────── */
+const PHONE_RE    = /(\+?\d[\d\s-]{7,}\d)/g;        // rough phone/WhatsApp
+const EMAIL_RE    = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const ADDRESS_HINTS = /(head\s*office|office|branch|showroom|address|factory|works|warehouse|hq|headquarters)[:\-]?\s*/i;
+
+const CONTACT_CACHE = {
+  whatsapp: null,
+  phone: null,
+  email: null,
+  address: null,
+};
+
+(function initContactsFromKB() {
+  try {
+    for (const v of VECTORS || []) {
+      const t = String(v.text_original || v.text_cleaned || v.text || "");
+      if (!t) continue;
+
+      // Emails
+      if (!CONTACT_CACHE.email) {
+        const em = t.match(EMAIL_RE);
+        if (em && em.length) CONTACT_CACHE.email = em[0];
+      }
+      // Phones/WhatsApp
+      if (!CONTACT_CACHE.phone || !CONTACT_CACHE.whatsapp) {
+        const ph = t.match(PHONE_RE);
+        if (ph && ph.length) {
+          const first = ph[0].replace(/\s+/g, " ").trim();
+          if (!CONTACT_CACHE.phone) CONTACT_CACHE.phone = first;
+          if (!CONTACT_CACHE.whatsapp) CONTACT_CACHE.whatsapp = first;
+        }
+      }
+      // Addresses: look for lines with hints
+      if (!CONTACT_CACHE.address) {
+        const lines = t.split(/\r?\n/);
+        for (const line of lines) {
+          if (ADDRESS_HINTS.test(line)) {
+            CONTACT_CACHE.address = line.trim();
+            break;
+          }
+        }
+      }
+      // Stop early if we have all
+      if (CONTACT_CACHE.email && CONTACT_CACHE.whatsapp && CONTACT_CACHE.address) break;
+    }
+  } catch (e) {
+    console.warn("KB contact parse error:", e?.message || e);
+  }
+
+  // Fallbacks if KB didn’t yield
+  if (!CONTACT_CACHE.whatsapp) CONTACT_CACHE.whatsapp = CONTACT_WHATSAPP;
+  if (!CONTACT_CACHE.phone)    CONTACT_CACHE.phone    = CONTACT_PHONE;
+  if (!CONTACT_CACHE.email)    CONTACT_CACHE.email    = CONTACT_EMAIL;
+  if (!CONTACT_CACHE.address)  CONTACT_CACHE.address  = CONTACT_HO_ADDR;
+})();
+
+/* ────────── Contact Intent Detector (explicit requests only) ────────── */
+function isContactIntent(q = "") {
+  const t = q.toLowerCase();
+  // Direct intents (must share contact)
+  if (/\b(contact|contact\s*us|phone|call|whats\s*app|whatsapp|mail|email|address|location|where|service|support|sales|helpdesk|showroom|branch|head\s*office|office)\b/.test(t)) {
+    // Avoid false positives like "contact sensor", etc. (rare here)
+    return true;
+  }
+  return false;
+}
+function contactReply(mode = "english") {
+  const lines = [
+    "Here are our contact details:",
+    `• WhatsApp: ${CONTACT_CACHE.whatsapp}`,
+    `• Phone: ${CONTACT_CACHE.phone}`,
+    `• Email: ${CONTACT_CACHE.email}`,
+    `• ${CONTACT_CACHE.address}`,
+  ];
+  if (mode === "hinglish") {
+    return [
+      "Yeh rahe hamare contact details:",
+      `• WhatsApp: ${CONTACT_CACHE.whatsapp}`,
+      `• Phone: ${CONTACT_CACHE.phone}`,
+      `• Email: ${CONTACT_CACHE.email}`,
+      `• ${CONTACT_CACHE.address}`,
+    ].join("\n");
+  }
+  return lines.join("\n");
+}
 
 /* ───────────── Entity & Hybrid Retrieval (dynamic, KB-driven) ────────── */
 let MODEL_SET = new Set();
@@ -225,33 +317,22 @@ async function tryGeminiText(prompt, opts = {}) {
       const isOverload = msg.includes("503") || msg.toLowerCase().includes("overloaded") || msg.toLowerCase().includes("service unavailable");
       const isQuota    = msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("api key");
 
-      // One-time model fallback if first attempt fails
       if (i === 0 && modelFallback && GENERATION_MODEL !== modelFallback) {
         console.warn("Switching to fallback model:", modelFallback);
         llm = genAI.getGenerativeModel({ model: modelFallback });
-        // immediate retry with fallback
         continue;
       }
-
-      // Retry on overload with exponential-ish backoff
       if (isOverload && i < retries - 1) {
         const wait = backoffMs * (i + 1);
         console.warn(`Gemini overloaded — retrying in ${wait}ms`);
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
-
-      // Non-retryable or out of attempts
-      if (isQuota) {
-        return "There seems to be a temporary issue with my AI engine. Please try again shortly.";
-      }
-      if (isOverload) {
-        return "Server is a bit busy right now ⏳ — please try again in a few seconds.";
-      }
+      if (isQuota) return "There seems to be a temporary issue with my AI engine. Please try again shortly.";
+      if (isOverload) return "Server is a bit busy right now ⏳ — please try again in a few seconds.";
       return "Sorry, I ran into a technical issue fetching that. Please try again.";
     }
   }
-  // If loop exits without return:
   console.error("Gemini final error:", lastErr?.message || lastErr);
   return "Sorry, I ran into a technical issue fetching that. Please try again.";
 }
@@ -281,6 +362,7 @@ export default async function handler(req, res) {
     const sessionId = getSessionId(req);
     const history = await loadHistory(sessionId, 10);
 
+    // Small talk
     const st = handleSmallTalkAll(q, { isFirstTurn });
     if (st && st.text) {
       await saveTurn(sessionId, "user", q || "");
@@ -288,19 +370,28 @@ export default async function handler(req, res) {
       return res.status(200).json({ answer: st.text, citations: [], mode: detectResponseMode(q || ""), bot: BOT_NAME });
     }
 
+    const mode = detectResponseMode(q);
+
+    // ── 1) Explicit CONTACT intent → reply immediately (no LLM)
+    if (isContactIntent(q)) {
+      const msg = contactReply(mode);
+      await saveTurn(sessionId, "user", q || "");
+      await saveTurn(sessionId, "assistant", msg);
+      return res.status(200).json({ answer: msg, citations: [], mode, bot: BOT_NAME });
+    }
+
+    // ── 2) RAG path
     if (!VECTORS.length) {
       const msg = "Embeddings not loaded on server. Add data/index.json (npm run embed) and redeploy.";
       await saveTurn(sessionId, "user", q || ""); await saveTurn(sessionId, "assistant", msg);
       return res.status(500).json({ error: msg });
     }
 
-    const mode = detectResponseMode(q);
     const cleaned = cleanForEmbedding(q) || q.toLowerCase();
-
     const stickyEntities = extractEntities(q, history);
     const kwList = [...stickyEntities];
 
-    // Embedding (light guard)
+    // Embedding guard
     let qVec = [];
     try {
       const embRes = await embedder.embedContent({ content: { parts: [{ text: cleaned }] } });
@@ -323,7 +414,6 @@ export default async function handler(req, res) {
       return { ...v, score, cos, kw };
     }).sort((a,b)=>b.score-a.score).slice(0, TOP_K);
 
-    // Entity lock & passability
     const topHit = candidates[0];
     const modelFoundInTop = stickyEntities.length>0 && candidates.some(c => {
       const txt=(c.text_original||c.text_cleaned||c.text||"").toLowerCase();
@@ -343,21 +433,21 @@ export default async function handler(req, res) {
     const context = candidates.map((s,i)=>`【${i+1}】 ${s.text_original || s.text_cleaned || s.text}`).join("\n\n");
     const recentChat = history.slice(-6).map(h => (h.role==="user"?`User: ${h.text}`:`Assistant: ${h.text}`)).join("\n");
 
-    // System guardrails — STRICT: only show contact if truly not in context
+    // Strict contact rule remains for non-contact queries
     const languageGuide = mode==="hinglish" ? `REPLY LANGUAGE: Hinglish (Hindi in Latin script). Do NOT use Devanagari.` : `REPLY LANGUAGE: English. Professional and concise.`;
     const systemInstruction = `
 You are ${BOT_NAME}, Dukejia’s assistant.
 Answer STRICTLY and ONLY from the provided CONTEXT.
 If the requested details are clearly NOT present in CONTEXT, reply exactly:
 "Please contact our sales team at 
-Whatsapp: +91 9350513789 
-Embroidery@grouphca.com"
+Whatsapp: ${CONTACT_CACHE.whatsapp} 
+${CONTACT_CACHE.email}"
 Rules:
 - Do not invent or add external knowledge.
 - Be concise and factual.
 - Prefer details about these STICKY ENTITIES if present: ${stickyEntities.join(", ") || "none"}.
 - Use recent chat for continuity if it helps resolve the user’s intent.
-- Absolutely do NOT include contact details unless the answer is not present in CONTEXT.
+- Do NOT include contact details unless the answer is not present in CONTEXT (unless the user explicitly asked for contact, which is handled separately before this step).
 - ${languageGuide}
 `.trim();
 
@@ -376,19 +466,18 @@ ${context}
 Format:
 - Direct answer grounded in CONTEXT (bullets/tables ok).
 - If NOT found in CONTEXT: “Please contact our sales team at 
-Whatsapp: +91 9350513789 
-Embroidery@grouphca.com”
+Whatsapp: ${CONTACT_CACHE.whatsapp} 
+${CONTACT_CACHE.email}”
 - Use the reply language specified above.
 `.trim();
 
-    // ── Robust call with retry/fallback
+    // Robust model call
     let text = await tryGeminiText(prompt, { retries: 2, backoffMs: 1200, modelFallback: FALLBACK_MODEL });
 
-    // Final safety: block premature contact drop if we actually had passable context
+    // Safety: block premature contact drop if we had passable context
     const contactLine = "Please contact our sales team";
     const containsContact = text.includes(contactLine);
     const contextLooksNonEmpty = Boolean(context && context.trim().length > 0);
-
     if (containsContact && contextLooksNonEmpty) {
       text = mode==="hinglish"
         ? "Mujhe context mein exact details nahi mili. Agar aap model/feature thoda aur specific batayenge to main exact specs dikha sakta hoon."
@@ -397,7 +486,7 @@ Embroidery@grouphca.com”
     if (!text) {
       text = contextLooksNonEmpty
         ? (mode==="hinglish" ? "Main context se details nikal raha hoon—please model/feature thoda aur specific batayein." : "I’m using the knowledge base—please specify the model/feature you need.")
-        : "Please contact our sales team at \nWhatsapp: +91 9350513789 \nEmbroidery@grouphca.com";
+        : `Please contact our sales team at \nWhatsapp: ${CONTACT_CACHE.whatsapp} \n${CONTACT_CACHE.email}`;
     }
 
     await saveTurn(sessionId,"user",q||"");
