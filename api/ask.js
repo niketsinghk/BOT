@@ -1,4 +1,4 @@
-// api/ask.js — Vercel serverless chatbot for Duke-Jia Assistant (Full version with all tokens + pointwise output)
+// api/ask.js — Vercel serverless chatbot for Duke-Jia Assistant (tokens + pointwise + retries/fallbacks)
 import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -22,8 +22,61 @@ if (!process.env.GOOGLE_API_KEY) throw new Error("Missing GOOGLE_API_KEY");
 
 /* ─────────────────────────── Google Gemini SDK ───────────────────────── */
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-const embedder = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
-const llm = genAI.getGenerativeModel({ model: GENERATION_MODEL });
+// We create embedder lazily via a helper (so retries wrap the call)
+
+/* ─────────────────────────── Fallbacks & Retries ─────────────────────── */
+const MODEL_CHAIN = [
+  process.env.GENERATION_MODEL || "gemini-2.5-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro"
+];
+const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || "3", 10);
+const BASE_BACKOFF_MS = parseInt(process.env.BASE_BACKOFF_MS || "400", 10);
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function isTransientError(err) {
+  const msg = (err?.message || "").toLowerCase();
+  const code = err?.status || err?.code;
+  return [429,500,502,503,504].includes(code) ||
+         /unavailable|overload|timeout|temporar|rate|quota|econn|network|fetch/i.test(msg);
+}
+async function withRetry(fn, { max = MAX_RETRIES, base = BASE_BACKOFF_MS } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= max; attempt++) {
+    try { return await fn(); }
+    catch (err) {
+      lastErr = err;
+      if (attempt === max || !isTransientError(err)) break;
+      const wait = base * Math.pow(2, attempt) + Math.floor(Math.random() * 150);
+      await sleep(wait);
+    }
+  }
+  throw lastErr;
+}
+async function getQueryEmbedding(cleaned) {
+  const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
+  const embRes = await withRetry(() =>
+    model.embedContent({ content: { parts: [{ text: cleaned }] } })
+  );
+  return embRes?.embedding?.values || embRes?.embeddings?.[0]?.values || [];
+}
+async function generateWithFallback(prompt) {
+  let lastErr;
+  for (const name of MODEL_CHAIN) {
+    try {
+      const model = genAI.getGenerativeModel({ model: name });
+      const out = await withRetry(() =>
+        model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] })
+      );
+      const text = out?.response?.text?.();
+      if (text && text.trim()) return { text, model: name };
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientError(err)) break; // hard fail → stop trying others
+    }
+  }
+  throw lastErr;
+}
 
 /* ───────────────────────────── Stopwords & Tokens ─────────────────────────────── */
 const EN_STOP = new Set(`a about above after again against all am an and any are aren't as at
@@ -50,7 +103,7 @@ const PROTECTED_TOKENS = new Set([
   "specification","specifications","model","models","single","multi","flagship","application","applications",
   "technical","leather","mattress","garment","automation",
 
-  // Key terms we don’t want removed
+  // Key terms
   "head","heads","needle","needles","area","mm","configuration","description","details",
 
   // Models (extend as needed)
@@ -182,14 +235,57 @@ function formatMachineResponse(rawText) {
 
   const area = rawText.match(/(\d{2,4}\s?[×x]\s?\d{2,4})/);
   const headNeedle = rawText.match(/(\d+)\s?(head|heads).+?(\d+)\s?(needle|needles)/i);
+
+  if (isEmb) {
+    return `
+🪡 **${model} — Embroidery Machine**
+
+**Description:** ${rawText.split(".")[0]}
+
+**Configuration:**
+• ${headNeedle ? `${headNeedle[1]} Heads, ${headNeedle[3]} Needles` : "Head & needle info on request"}  
+• ${area ? `Embroidery Area: ${area[0]} mm` : "Embroidery area available on request"}
+
+**Next:**
+• Say “show features” or “full specs” for details
+`.trim();
   }
 
+  if (isQuilt) {
+    return `
+🧶 **${model} — Quilting Machine**
+
+**Description:** ${rawText.split(".")[0]}
+
+**Application:**
+• Pattern stitching for quilts, mattress covers, and layered fabrics
+
+**Next:**
+• Say “show features” or “full specs” for details
+`.trim();
+  }
+
+  if (isPerf) {
+    return `
+🪚 **${model} — Perforation / Stitching Machine**
+
+**Description:** ${rawText.split(".")[0]}
+
+**Application:**
+• Leather, foam, or technical textiles needing punching + stitching precision
+
+**Next:**
+• Say “show features” or “full specs” for details
+`.trim();
+  }
+
+  return rawText;
+}
 
 /* ────────────────── Point-wise Output Normalizer ────────────────── */
 function hasList(text) {
   return /(^|\n)\s*(?:•|-|\d+\.)\s+/.test(text);
 }
-
 function extractContact(text) {
   const lines = text.split(/\r?\n/);
   const contact = [];
@@ -200,9 +296,7 @@ function extractContact(text) {
   }
   return { rest: rest.join("\n").trim(), contact: contact.join("\n").trim() };
 }
-
 function toBullets(plain) {
-  // Split into sentences conservatively; keep 4–8 meaningful points
   const sentences = plain
     .replace(/\r?\n+/g, " ")
     .split(/(?<=[.!?])\s+(?=[A-Z(“"']|\d)/)
@@ -212,21 +306,11 @@ function toBullets(plain) {
   if (!sentences.length) return plain;
   return sentences.map(s => `• ${s}`).join("\n");
 }
-
-/**
- * If the text is a simple paragraph (not already a list or machine block),
- * convert it into clean bullet points. Preserve any contact lines at the end.
- */
+/** Convert simple paragraphs to bullets; keep contact lines & machine blocks */
 function enforcePointwise(text) {
   if (!text || hasList(text)) return text;
-
-  // Keep machine blocks (they already have sections)
-  if (/^\s*[<>]/.test(text)) return text;
-
-  // Keep pure contact-only replies
-  const contactOnly = /^please contact/i.test(text.trim());
-  if (contactOnly) return text;
-
+  if (/^\s*[🪡🧶🪚]/.test(text)) return text;       // keep machine sections
+  if (/^please contact/i.test(text.trim())) return text; // pure handoff
   const { rest, contact } = extractContact(text);
   const bullets = toBullets(rest);
   return contact ? `${bullets}\n\n${contact}` : bullets;
@@ -272,10 +356,12 @@ export default async function handler(req, res) {
 
     const mode = detectResponseMode(q);
     const cleaned = cleanForEmbedding(q);
-    const embRes = await embedder.embedContent({ content: { parts: [{ text: cleaned }] } });
-    const qVec = embRes?.embedding?.values || embRes?.embeddings?.[0]?.values || [];
+
+    // Embedding with retries
+    const qVec = await getQueryEmbedding(cleaned);
     if (!qVec.length) return res.status(500).json({ error: "Embedding failed" });
 
+    // Retrieve top-K
     const top = VECTORS.map(v => ({ ...v, score: cosineSim(qVec, v.embedding) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, TOP_K);
@@ -323,8 +409,22 @@ Output:
 - Keep it readable; lists and short lines preferred.
 `.trim();
 
-    const result = await llm.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-    let text = result?.response?.text?.() || `Please contact our sales team at
+    // LLM with fallback
+    let llmOut;
+    try {
+      llmOut = await generateWithFallback(prompt);
+    } catch (err) {
+      const friendly =
+        "The assistant is busy and couldn’t complete your request.\nPlease try again in a moment, or share your material/area so I can recommend the best model.";
+      return res.status(200).json({
+        answer: friendly,
+        mode,
+        bot: BOT_NAME,
+        errorHint: err?.message || "LLM unavailable"
+      });
+    }
+
+    let text = llmOut.text || `Please contact our sales team at
 WhatsApp: ${CONTACT_WHATSAPP}
 Email: ${CONTACT_EMAIL}`;
 
