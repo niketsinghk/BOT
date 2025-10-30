@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Dukejia</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body{ margin:0; font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial,"Noto Sans","Apple Color Emoji","Segoe UI Emoji"; }
+    :root{ --hca-pur:#a29bfe; --hca-blue:#7aa2ff; --hca-bg:#faf9f6; --hca-dark:#0f172a; --hca-muted:#6b7280; --hca-radius:16px; }
+
+    /* ===== Widget shell ===== */
+    .hca-fab{
+      position:fixed; right:34px; bottom:43px; width:26px; height:8px; border-radius:50%;
+      background:linear-gradient(135deg,var(--hca-pur),var(--hca-blue));
+      display:flex; align-items:center; justify-content:center; box-shadow:0 12px 32px rgba(0,0,0,.18);
+      cursor:pointer; z-index:9999; user-select:none;
+    }
+    .hca-fab img{ width:176px; height:100px; display:block; filter:none !important; }
+
+    .hca-panel{
+      position:fixed; right:24px; bottom:100px; width:310px; height:460px; background:#faf9f6; border-radius:18px;
+      box-shadow:0 20px 40px rgba(0,0,0,.22); display:none; flex-direction:column; overflow:hidden; z-index:10000;
+    }
+    .hca-panel.open{ display:flex; }
+
+    .hca-head{
+      background:linear-gradient(135deg,var(--hca-pur),var(--hca-blue));
+      padding:12px 14px; color:#faf9f6; font:700 16px Inter,system-ui; display:flex; justify-content:space-between; align-items:center;
+    }
+    .hca-head-left{ display:flex; align-items:center; gap:10px; }
+    .hca-head-left img{ width:24px; height:24px; display:block; border-radius:6px; filter:none !important; }
+    .hca-actions{ display:flex; gap:8px; }
+    .hca-btn{ background:rgba(255,255,255,.2); border:0; color:#faf9f6; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+    .hca-btn:hover{ background:rgba(255,255,255,.3); }
+
+    .hca-body{ flex:1; background:#f8fafc; padding:12px; overflow:auto; }
+    .hca-row{ display:flex; gap:8px; align-items:flex-end; margin:8px 0; }
+    .hca-row.user{ justify-content:flex-end; flex-direction:row-reverse; }
+
+    /* Avatar uses <img> so PNG transparency is preserved */
+    .hca-avatar{ width:30px; height:30px; flex:0 0 30px; display:flex; align-items:center; justify-content:center; }
+    .hca-avatar img{ width:100%; height:100%; object-fit:contain; display:block; }
+
+    .hca-bubble{ max-width:76%; padding:10px 12px; border-radius:14px; font:500 14px/1.5 Inter,system-ui; word-wrap:break-word; }
+    .hca-row.bot  .hca-bubble{ background:#faf9f6; color:#111; border:1px solid #e5e7eb; border-bottom-left-radius:6px; box-shadow:0 2px 8px rgba(15,23,42,.06); }
+    .hca-row.user .hca-bubble{ background:#8c84f5; color:#faf9f6; border-bottom-right-radius:6px; text-align:right; margin-left:auto; }
+
+    .hca-row.bot .hca-bubble code{
+      font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+      background:#f1f5f9; padding:0 .25em; border-radius:4px;
+    }
+    .hca-row.bot .hca-bubble a{ color:#8c84f5; text-decoration:underline; }
+
+    /* Suggestions (starter chips) */
+    .dj-suggestions{ display:flex; flex-wrap:wrap; gap:8px; padding:6px 12px 0; background:#f8fafc; border-top:1px dashed #e5e7eb; }
+    .dj-chip{
+      appearance:none; border:1px dashed #cbd5e1; background:#fff;
+      color:#0f172a; border-radius:999px; padding:8px 12px; font:500 13px/1.1 Inter,system-ui;
+      cursor:pointer; transition:all .15s ease; white-space:nowrap;
+    }
+    .dj-chip:hover{ background:#eef2ff; border-color:#94a3b8; }
+    .dj-chip:active{ transform:translateY(1px); }
+
+    .hca-foot{ padding:10px; background:#faf9f6; border-top:1px solid #e5e7eb; display:flex; gap:8px; }
+    .hca-input{ flex:1; border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; font:500 14px Inter,system-ui; }
+    .hca-send{ background:#833ade; color:#faf9f6; border:0; border-radius:12px; cursor:pointer; }
+    .hca-send[disabled]{ opacity:.6; cursor:not-allowed; }
+
+    /* Typing indicator */
+    .hca-typing-row{display:flex;gap:8px;align-items:flex-end;margin:8px 0;}
+    .hca-typing-bubble{background:#8c84f5;border:1px solid #e5e7eb;border-radius:16px;padding:8px 12px;display:flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 2px 6px rgba(0,0,0,.15);}
+    .hca-typing-dot{width:6px;height:6px;border-radius:50%;background:#000;opacity:.4;animation:hcaBlink 1.4s infinite;}
+    .hca-typing-dot:nth-child(2){animation-delay:.2s;}
+    .hca-typing-dot:nth-child(3){animation-delay:.4s;}
+    @keyframes hcaBlink{0%,80%,100%{opacity:.4;transform:translateY(0);}40%{opacity:1;transform:translateY(-2px);} }
+
+    /* Responsive */
+    @media (max-width:520px){
+      .hca-panel{ right:10px; left:10px; width:auto; height:72vh; }
+      .dj-chip{ font-size:12px; padding:7px 10px; }
+    }
+
+    /* Hint bubble */
+    .hca-hint{
+      position:fixed; right:86px; bottom:30px; max-width:240px; background:#faf9f6; color:#0f172a;
+      border:1px solid #e5e7eb; border-radius:14px; padding:10px 12px; font:600 14px/1.35 Inter,system-ui;
+      box-shadow:0 10px 30px rgba(0,0,0,.12); opacity:0; transform:translateY(8px);
+      pointer-events:none; transition:opacity .2s ease, transform .2s ease; z-index:10001;
+      display:flex; align-items:flex-start; gap:8px;
+    }
+    .hca-hint.show{ opacity:1; transform:translateY(0); pointer-events:auto; }
+    .hca-hint:after{
+      content:""; position:absolute; right:-8px; bottom:12px; width:0; height:0;
+      border-left:10px solid #faf9f6; border-top:8px solid transparent; border-bottom:8px solid transparent;
+    }
+
+    /* Subtle float motion (works for PNG too) */
+    #hca-fab-icon, #hca-head-icon{ animation: dukiFloat 4.8s ease-in-out infinite; transform-origin:50% 60%; }
+    .hca-row.bot .hca-avatar{ animation: dukiAvatarFloat 5.2s ease-in-out infinite; transform-origin:50% 70%; }
+
+    @keyframes dukiFloat{
+      0%{transform:translateY(0) rotate(0)}
+      25%{transform:translateY(-2px) rotate(2deg)}
+      50%{transform:translateY(0) rotate(0)}
+      75%{transform:translateY(2px) rotate(-2deg)}
+      100%{transform:translateY(0) rotate(0)}
+    }
+    @keyframes dukiAvatarFloat{
+      0%{transform:translateY(0) rotate(0) scale(1)}
+      25%{transform:translateY(-1.5px) rotate(1.2deg) scale(1.01)}
+      50%{transform:translateY(0) rotate(0) scale(1)}
+      75%{transform:translateY(1.5px) rotate(-1.2deg) scale(0.995)}
+      100%{transform:translateY(0) rotate(0) scale(1)}
+    }
+  </style>
+</head>
+<body>
+
+<div id="hca-chat-root"></div>
+<script>
+(() => {
+  /* ---------- ICONS: PNG (transparent) ---------- */
+  const ICON_PATH = "duke.png";   // ensure duke.png is next to this HTML
+  const BASE_ICON_URL = ICON_PATH;
+  const BOT_ICON_URL  = ICON_PATH;
+  const USER_ICON_URL = "https://www.svgrepo.com/show/532363/user-alt-1.svg";
+
+  window.HCA_BASE_ICON = BASE_ICON_URL;
+  window.HCA_BOT_ICON  = BOT_ICON_URL;
+  window.HCA_USER_ICON = USER_ICON_URL;
+
+  /* ---------- API CONFIG ---------- */
+  const API_BASE = window.HCA_API_BASE || "";
+  const API_URL  = `${API_BASE}/api/ask`;
+  const HEALTH   = `${API_BASE}/api/health`;
+  const RESET    = `${API_BASE}/api/reset`;
+
+  /* ---------- Greeting ---------- */
+  function getISTGreeting(){
+    const hour = Number(new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Kolkata",hour:"2-digit",hour12:false}).format(new Date()));
+    if (hour < 5)  return "Good night";
+    if (hour < 12) return "Good morning";
+    if (hour < 17) return "Good afternoon";
+    if (hour < 21) return "Good evening";
+    return "Good night";
+  }
+  const buildWelcomeLine = () => `${getISTGreeting()}! I’m Duki`;
+
+  /* ---------- Session ---------- */
+  function getOrCreateSessionId(){
+    const KEY = "dukejia_session_id";
+    try{
+      let sid = localStorage.getItem(KEY);
+      if(!sid){
+        sid = (crypto && crypto.randomUUID) ? crypto.randomUUID()
+             : "sid-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        localStorage.setItem(KEY, sid);
+      }
+      return sid;
+    }catch{
+      return (crypto && crypto.randomUUID) ? crypto.randomUUID()
+           : "sid-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    }
+  }
+  const SESSION_ID = getOrCreateSessionId();
+
+  /* ---------- UI ---------- */
+  const root = document.getElementById("hca-chat-root");
+  root.innerHTML = `
+    <div class="hca-fab" aria-label="Open Duki" title="Duki">
+      <img id="hca-fab-icon" alt="Chat"/>
+    </div>
+
+    <div class="hca-hint" id="hca-hint" role="status" aria-live="polite">
+      <span id="hca-hint-text">Need help with sewing solutions? I’m here.</span>
+      <button type="button" class="hca-hint-close" title="Dismiss" aria-label="Dismiss">×</button>
+    </div>
+
+    <div class="hca-panel" role="dialog" aria-label="Duki">
+      <div class="hca-head">
+        <div class="hca-head-left">
+          <img id="hca-head-icon" alt="Assistant"/>
+          <span id="hca-title">Duki</span>
+        </div>
+        <div class="hca-actions">
+          <button class="hca-btn" id="hca-refresh" title="Restart chat" aria-label="Restart chat">⟲</button>
+          <button class="hca-btn" id="hca-close" title="Close" aria-label="Close">✕</button>
+        </div>
+      </div>
+
+      <div class="hca-body" id="hca-log"></div>
+
+      <!-- Starter suggestions -->
+      <div id="dj-suggestions" class="dj-suggestions" aria-label="Starter questions"></div>
+
+      <div class="hca-foot">
+        <input class="hca-input" id="hca-input" placeholder="Ask about Flagship, Single-head, Multi-head, Quilting or Perforation…"/>
+        <button class="hca-send" id="hca-send">Send</button>
+      </div>
+    </div>
+  `;
+
+  /* ---------- Shortcuts ---------- */
+  const $ = sel => root.querySelector(sel);
+  const fab = $(".hca-fab");
+  const panel = $(".hca-panel");
+  const closeBtn = $("#hca-close");
+  const refreshBtn = $("#hca-refresh");
+  const log = $("#hca-log");
+  const input = $("#hca-input");
+  const sendBtn = $("#hca-send");
+  const hint = $("#hca-hint");
+  const hintText = $("#hca-hint-text");
+  const hintClose = hint.querySelector(".hca-hint-close");
+  const suggWrap = $("#dj-suggestions");
+
+  /* ---------- Icons (with fallback) ---------- */
+  function setIcon(imgEl, url){
+    imgEl.loading = "eager";
+    imgEl.decoding = "async";
+    imgEl.src = url;
+    imgEl.onerror = () => {
+      imgEl.src = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'><circle cx='14' cy='14' r='12' fill='%23e5e7eb'/></svg>";
+    };
+  }
+  setIcon(document.getElementById("hca-fab-icon"),  window.HCA_BASE_ICON);
+  setIcon(document.getElementById("hca-head-icon"), window.HCA_BASE_ICON);
+
+  /* ---------- Title ---------- */
+  const titleEl = $("#hca-title"); if (titleEl) titleEl.textContent = "Duki";
+
+  /* ---------- First message ---------- */
+  appendMsg(buildWelcomeLine(), "bot");
+  hintText.textContent = buildWelcomeLine();
+
+  /* ---------- Hint logic ---------- */
+  const USED_KEY = "dukejia_used_this_session";
+  let memOK = true; try{ sessionStorage.setItem("_dukejia_test","1"); sessionStorage.removeItem("_dukejia_test"); }catch{ memOK=false; }
+  let usedInMem = false;
+  const hasUsed  = () => memOK ? sessionStorage.getItem(USED_KEY) === "1" : usedInMem;
+  const markUsed = () => { if(memOK){ sessionStorage.setItem(USED_KEY,"1"); } else { usedInMem = true; } };
+  const clearUsed= () => { if(memOK){ sessionStorage.removeItem(USED_KEY); } else { usedInMem = false; } };
+
+  const HINT_DELAY_MS = 1000;
+  const HINT_RESHOW_AFTER_CLOSE_MS = 10000;
+  const HINT_IDLE_RESHOW_MS = 45000;
+  let hintTimer = null;
+
+  function scheduleHint(ms){ clearTimeout(hintTimer); hintTimer = setTimeout(showHint, ms); }
+  function showHint(){ if(!panel.classList.contains("open")) hint.classList.add("show"); }
+  function hideHint(){ hint.classList.remove("show"); }
+
+  setTimeout(() => { if(!hasUsed()) showHint(); }, HINT_DELAY_MS);
+  hint.addEventListener("click", () => { hideHint(); togglePanel(true); markUsed(); });
+  hintClose.addEventListener("click", (e) => { e.stopPropagation(); hideHint(); });
+
+  function togglePanel(show){
+    panel.classList[show ? "add" : "remove"]("open");
+    if(show){ input.focus(); hideHint(); markUsed(); clearTimeout(hintTimer); }
+  }
+  fab.onclick = () => togglePanel(true);
+  closeBtn.onclick = () => { togglePanel(false); clearUsed(); scheduleHint(HINT_RESHOW_AFTER_CLOSE_MS); };
+
+  /* ---------- Simple Markdown rendering ---------- */
+  const addHttp = url => /^https?:\/\//i.test(url) ? url : `https://${url}`;
+  const digits = s => String(s||"").replace(/[^\d]/g,"");
+  const telHref = s => `tel:${digits(s)}`;
+  const waHref = s => { let n = digits(s); if (n.length <= 10) n = "91" + n; return `https://wa.me/${n}`; };
+
+  function renderMarkdown(inputText){
+    const escapeHtml = s => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    const text = escapeHtml(inputText).replace(/\r\n/g, "\n");
+    const inline = (s) => {
+      s = s.replace(/(?![^<]*>)(Call|Phone|Mobile|Number|Tel(?:ephone)?)\s*[:\-]?\s*([+]?[\d\s().-]{6,}\d)/gi,
+        (_m, label, num) => `<a href="${telHref(num)}" target="_blank" rel="noopener">${label}: ${num.replace(/\s+/g," ").trim()}</a>`);
+      s = s.replace(/(?![^<]*>)(?:https?:\/\/)?wa\.me\/(\d{6,})/gi,
+        (_m, num) => `<a href="https://wa.me/${num}" target="_blank" rel="noopener">WhatsApp</a>`);
+      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      s = s.replace(/(?![^<]*>)([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g, '<a href="mailto:$1" target="_blank" rel="noopener">$1</a>');
+      s = s.replace(/(?![^<]*>)(WhatsApp|Whatsapp|WA)\s*[:\-]?\s*([+]?[\d\s().-]{6,}\d)/gi,
+        (_m, _w, num) => `<a href="${waHref(num)}" target="_blank" rel="noopener">WhatsApp: ${num.replace(/\s+/g," ").trim()}</a>`);
+      s = s.replace(/(?![^<]*>)(?<!\w)(\+?[\d][\d\s().-]{6,}\d)(?!\w)/g,
+        (m) => `<a href="${telHref(m)}" target="_blank" rel="noopener">${m}</a>`);
+      s = s.replace(/(?![^<]*>)(\b(?:https?:\/\/|www\.)[^\s<)]+[^\s<).,!?:;])/gi,
+        (m) => `<a href="${addHttp(m)}" target="_blank" rel="noopener">${m.replace(/^https?:\/\//i,'')}</a>`);
+      s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+      s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
+      return s;
+    };
+    const lines = text.split("\n"); let html="", inList=false; const closeList=()=>{if(inList){html+="</ul>";inList=false;}}; 
+    for (let i=0;i<lines.length;i++){
+      const line=lines[i]; const m=line.match(/^\s*[*-]\s+(.+)/);
+      if(m){ if(!inList){html+="<ul>";inList=true;} html+=`<li>${inline(m[1].trim())}</li>`; continue; }
+      if(line.trim()===""){ closeList(); html+="<br/>"; continue; }
+      closeList(); html+=inline(line)+"<br/>";
+    }
+    closeList(); return html;
+  }
+
+  /* ---------- Message bubbles ---------- */
+  function appendMsg(text, who="bot"){
+    const row = document.createElement("div");
+    row.className = `hca-row ${who}`;
+
+    const avatar = document.createElement("div");
+    avatar.className = "hca-avatar";
+    const img = document.createElement("img");
+    img.alt = who === "bot" ? "Duki" : "You";
+    img.src = who === "bot" ? window.HCA_BOT_ICON : window.HCA_USER_ICON;
+    img.decoding = "async";
+    avatar.appendChild(img);
+
+    const bubble = document.createElement("div");
+    bubble.className = "hca-bubble";
+    bubble.innerHTML = renderMarkdown(text);
+
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+    return bubble;
+  }
+
+  /* ---------- Typing indicator ---------- */
+  let typingEl=null;
+  function showTyping(show){
+    if(show){
+      if(typingEl) return;
+      const row=document.createElement("div");
+      row.className="hca-row bot hca-typing-row";
+      const avatar=document.createElement("div");
+      avatar.className="hca-avatar";
+      const img = document.createElement("img");
+      img.alt="Duki"; img.src = window.HCA_BOT_ICON; img.decoding="async";
+      avatar.appendChild(img);
+      const bubble=document.createElement("div");
+      bubble.className="hca-typing-bubble";
+      for(let i=0;i<3;i++){const d=document.createElement("span");d.className="hca-typing-dot";bubble.appendChild(d);}
+      row.appendChild(avatar);row.appendChild(bubble);
+      typingEl=row;log.appendChild(typingEl);log.scrollTop=log.scrollHeight;
+    }else if(typingEl){typingEl.remove();typingEl=null;}
+  }
+
+  /* ---------- Suggestions (starter chips) ---------- */
+  // Set per page if you want: window.DJ_PAGE_HINTS = { segment:"Perforation" };
+  const PAGE_HINTS = window.DJ_PAGE_HINTS ?? { segment: "Embroidery" };
+
+  const SUGGESTIONS = {
+    Embroidery: [
+      "Suggest embroidery machine",
+      "Compare single-head vs multi-head",
+      "Show specs for DY-1206H",
+      "What’s the embroidery area for DY-1201H?"
+    ],
+    Quilting: [
+      "Show specs for CS3000 quilting",
+      "Quilting machine for mattress panels",
+      "What stitch types are supported?",
+
+    ],
+    Perforation: [
+      "Suggest machine for leather perforation",
+      "Best for automotive seat covers?"
+    ],
+    Generic: [
+      "What are machines you offer?",
+      "Recommend a machine for uniforms",
+      "How to get a demo?"
+    ]
+  };
+
+  function hideSuggestions(){ if(suggWrap) suggWrap.style.display = "none"; }
+  function showSuggestions(){ if(suggWrap) suggWrap.style.display = "flex"; }
+  function renderSuggestions(){
+    if(!suggWrap) return;
+    const seg = (PAGE_HINTS.segment || "Generic");
+    const bank = (SUGGESTIONS[seg] || []).concat(SUGGESTIONS.Generic).slice(0,6);
+    suggWrap.innerHTML = "";
+    bank.forEach(label => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "dj-chip";
+      b.textContent = label;
+      b.onclick = () => sendQuick(label);
+      suggWrap.appendChild(b);
+    });
+  }
+
+  /* ---------- Ask (core) ---------- */
+  async function askCore(userText, opts = {}){
+    const { pageHints = PAGE_HINTS, isFirstTurn = false } = opts;
+    appendMsg(userText, "user"); hideHint(); hideSuggestions();
+    input.value=""; input.disabled=true; sendBtn.disabled=true; showTyping(true);
+
+    try{
+      const res = await fetch(API_URL, {
+        method:"POST",
+        headers:{ "Content-Type":"application/json", "X-Session-ID": SESSION_ID },
+        credentials:"include",
+        body: JSON.stringify({ message: userText, pageHints, isFirstTurn })
+      });
+      const text = await res.text(); let data = {};
+      try{ data = JSON.parse(text); }catch{ data = { answer: text }; }
+      if(!res.ok){
+        const errMsg = (data.error || data.details || data.message) || `HTTP ${res.status}`;
+        appendMsg(String(errMsg), "bot");
+      }else{
+        appendMsg(data.answer || data.output || "Sorry, I couldn't find that.", "bot");
+      }
+    }catch(e){
+      appendMsg("Server error. Please try again.", "bot");
+    }finally{
+      showTyping(false); input.disabled=false; sendBtn.disabled=false; input.focus();
+      clearTimeout(hintTimer); scheduleHint(HINT_IDLE_RESHOW_MS);
+    }
+  }
+
+  async function ask(){
+    const q = input.value.trim(); if(!q) return;
+    if(q.toLowerCase()==="/restart" || q.toLowerCase()==="/refresh"){ input.value=""; resetChat(); return; }
+    askCore(q, { pageHints: PAGE_HINTS, isFirstTurn:false });
+  }
+
+  function sendQuick(label){
+    askCore(label, { pageHints: PAGE_HINTS, isFirstTurn:false });
+  }
+
+  document.getElementById("hca-send").onclick = ask;
+  document.getElementById("hca-input").addEventListener("keydown", (e)=>{ if(e.key==="Enter") ask(); });
+
+  /* ---------- Reset / Restart ---------- */
+  async function resetChat(){
+    log.innerHTML = "";
+    appendMsg(buildWelcomeLine(), "bot");
+    showSuggestions();
+    try{ localStorage.removeItem("dukejia_history"); sessionStorage.removeItem("dukejia_history"); }catch(_){}
+    try{
+      await fetch(RESET, {
+        method:"POST", headers:{ "Content-Type":"application/json", "X-Session-ID": SESSION_ID },
+        credentials:"include", body: JSON.stringify({ sessionId: SESSION_ID })
+      });
+    }catch(_){}
+    input.value=""; input.focus(); scheduleHint(800);
+  }
+  refreshBtn.onclick = resetChat;
+
+  /* ---------- Init ---------- */
+  renderSuggestions(); // show chips initially
+
+  /* Health/version pings */
+  fetch(HEALTH, { credentials:"include" }).then(r=>r.json()).then(j=>console.log("Duki:", j)).catch(()=>{});
+  fetch((window.HCA_API_BASE || "") + "/api/version", { credentials:"include" })
+    .then(r=>r.json()).then(info=>console.log("Duki build:", info)).catch(()=>{});
+})();
+</script>
+
+</body>
+</html>
