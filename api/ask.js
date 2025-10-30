@@ -1,4 +1,4 @@
-// api/ask.js — contact intent (instant reply) + optional Redis + dynamic-entity hybrid RAG + strict fallback + resilient Gemini retries
+// api/ask.js — contact intent + category intent (lexical fallback) + optional Redis + dynamic-entity hybrid RAG + strict fallback + resilient Gemini retries
 import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -16,7 +16,7 @@ const MIN_OK_SCORE     = parseFloat(process.env.MIN_OK_SCORE || "0.16");
 const BOT_NAME        = process.env.BOT_NAME || "Duki";
 const FRONTEND_GREETS = (process.env.FRONTEND_GREETS ?? "true") !== "false";
 
-// Contact fallbacks (used if KB doesn’t contain them)
+// Contact fallbacks
 const CONTACT_WHATSAPP = process.env.CONTACT_WHATSAPP || "+91 9350513789";
 const CONTACT_EMAIL    = process.env.CONTACT_EMAIL    || "Embroidery@grouphca.com";
 const CONTACT_PHONE    = process.env.CONTACT_PHONE    || "+91 9350513789";
@@ -110,55 +110,32 @@ function loadVectors() {
 let VECTORS=[]; try{ VECTORS = loadVectors(); }catch(e){ console.warn(e.message); }
 
 /* ───────── KB Contact Extraction (once at cold start) ───────── */
-const PHONE_RE    = /(\+?\d[\d\s-]{7,}\d)/g;        // rough phone/WhatsApp
+const PHONE_RE    = /(\+?\d[\d\s-]{7,}\d)/g;
 const EMAIL_RE    = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const ADDRESS_HINTS = /(head\s*office|office|branch|showroom|address|factory|works|warehouse|hq|headquarters)[:\-]?\s*/i;
-
-const CONTACT_CACHE = {
-  whatsapp: null,
-  phone: null,
-  email: null,
-  address: null,
-};
+const CONTACT_CACHE = { whatsapp: null, phone: null, email: null, address: null };
 
 (function initContactsFromKB() {
   try {
     for (const v of VECTORS || []) {
       const t = String(v.text_original || v.text_cleaned || v.text || "");
       if (!t) continue;
-
-      // Emails
-      if (!CONTACT_CACHE.email) {
-        const em = t.match(EMAIL_RE);
-        if (em && em.length) CONTACT_CACHE.email = em[0];
-      }
-      // Phones/WhatsApp
+      if (!CONTACT_CACHE.email)    { const em = t.match(EMAIL_RE); if (em?.length) CONTACT_CACHE.email = em[0]; }
       if (!CONTACT_CACHE.phone || !CONTACT_CACHE.whatsapp) {
         const ph = t.match(PHONE_RE);
-        if (ph && ph.length) {
+        if (ph?.length) {
           const first = ph[0].replace(/\s+/g, " ").trim();
-          if (!CONTACT_CACHE.phone) CONTACT_CACHE.phone = first;
+          if (!CONTACT_CACHE.phone)    CONTACT_CACHE.phone = first;
           if (!CONTACT_CACHE.whatsapp) CONTACT_CACHE.whatsapp = first;
         }
       }
-      // Addresses: look for lines with hints
       if (!CONTACT_CACHE.address) {
-        const lines = t.split(/\r?\n/);
-        for (const line of lines) {
-          if (ADDRESS_HINTS.test(line)) {
-            CONTACT_CACHE.address = line.trim();
-            break;
-          }
-        }
+        const line = t.split(/\r?\n/).find(l => ADDRESS_HINTS.test(l));
+        if (line) CONTACT_CACHE.address = line.trim();
       }
-      // Stop early if we have all
       if (CONTACT_CACHE.email && CONTACT_CACHE.whatsapp && CONTACT_CACHE.address) break;
     }
-  } catch (e) {
-    console.warn("KB contact parse error:", e?.message || e);
-  }
-
-  // Fallbacks if KB didn’t yield
+  } catch(e){ console.warn("KB contact parse error:", e?.message || e); }
   if (!CONTACT_CACHE.whatsapp) CONTACT_CACHE.whatsapp = CONTACT_WHATSAPP;
   if (!CONTACT_CACHE.phone)    CONTACT_CACHE.phone    = CONTACT_PHONE;
   if (!CONTACT_CACHE.email)    CONTACT_CACHE.email    = CONTACT_EMAIL;
@@ -168,12 +145,7 @@ const CONTACT_CACHE = {
 /* ────────── Contact Intent Detector (explicit requests only) ────────── */
 function isContactIntent(q = "") {
   const t = q.toLowerCase();
-  // Direct intents (must share contact)
-  if (/\b(contact|contact\s*us|phone|call|whats\s*app|whatsapp|mail|email|address|location|where|service|support|sales|helpdesk|showroom|branch|head\s*office|office)\b/.test(t)) {
-    // Avoid false positives like "contact sensor", etc. (rare here)
-    return true;
-  }
-  return false;
+  return /\b(contact|contact\s*us|phone|call|whats\s*app|whatsapp|mail|email|address|location|where|service|support|sales|helpdesk|showroom|branch|head\s*office|office)\b/.test(t);
 }
 function contactReply(mode = "english") {
   const lines = [
@@ -265,6 +237,60 @@ function kwScoreFor(v, kwList){
   return s;
 }
 
+/* ───────────── Category Intent + Lexical Fallback (for broad asks) ───── */
+const CATEGORY_DEFS = {
+  embroidery: {
+    kw: ["embroidery", "embroidery machine", "single head", "multi head", "dukejia", "dy-"],
+    promptHint: "Embroidery machines overview, use specs/features if present.",
+  },
+  perforation: {
+    kw: ["perforation", "leather punching", "punching", "pe750", "pe750x600", "punch"],
+    promptHint: "Leather perforation/punching machines overview.",
+  },
+  quilting: {
+    kw: ["quilting", "cs3000", "quilting machine", "mattress", "quilt"],
+    promptHint: "Quilting machines overview (CS3000 etc.).",
+  },
+  pattern: {
+    kw: ["pattern sewing", "programmable", "pattern", "tacking", "bartack"],
+    promptHint: "Programmable pattern sewing overview.",
+  },
+};
+
+function detectCategoryIntent(q = "") {
+  const t = q.toLowerCase();
+  for (const [cat, def] of Object.entries(CATEGORY_DEFS)) {
+    if (def.kw.some(k => t.includes(k))) return cat;
+  }
+  // very broad intents
+  if (/^what\s+is\s+embroidery( machine)?\b/i.test(q)) return "embroidery";
+  if (/^i\s+want\s+embroidery( machine)?\b/i.test(q))   return "embroidery";
+  return null;
+}
+
+// simple lexical scorer (BM25-lite)
+function lexicalTop(vectors, keywords, k = 8) {
+  const toks = keywords
+    .flatMap(w => [w, w.replace(/\s+/g, "-"), w.replace(/\s+/g, "")])
+    .map(w => w.toLowerCase());
+  const scored = [];
+  for (const v of vectors) {
+    const txt = String(v.text_original || v.text_cleaned || v.text || "").toLowerCase();
+    if (!txt) continue;
+    let s = 0;
+    for (const w of toks) {
+      if (!w || w.length < 3) continue;
+      const m = txt.match(new RegExp(`\\b${escapeRegExp(w)}\\b`, "g"));
+      s += (m?.length || 0);
+      // also partial contains bonus
+      if (!m?.length && txt.includes(w)) s += 0.3;
+    }
+    if (s > 0) scored.push({ ...v, lex: s, score: s });
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, k);
+}
+function escapeRegExp(s){return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");}
+
 /* ─────────────────────── Small-talk (same as before) ─────────────────── */
 function getISTGreeting(now=new Date()){
   const hour=Number(new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Kolkata",hour:"2-digit",hour12:false}).format(now));
@@ -300,7 +326,7 @@ function handleSmallTalkAll(q,{isFirstTurn=false}={}){
 async function tryGeminiText(prompt, opts = {}) {
   const {
     retries = 2,
-    backoffMs = 1200, // initial wait
+    backoffMs = 1200,
     modelFallback = FALLBACK_MODEL
   } = opts;
 
@@ -362,7 +388,7 @@ export default async function handler(req, res) {
     const sessionId = getSessionId(req);
     const history = await loadHistory(sessionId, 10);
 
-    // Small talk
+    // 0) Small talk
     const st = handleSmallTalkAll(q, { isFirstTurn });
     if (st && st.text) {
       await saveTurn(sessionId, "user", q || "");
@@ -372,7 +398,7 @@ export default async function handler(req, res) {
 
     const mode = detectResponseMode(q);
 
-    // ── 1) Explicit CONTACT intent → reply immediately (no LLM)
+    // 1) Explicit CONTACT intent → reply immediately (no LLM)
     if (isContactIntent(q)) {
       const msg = contactReply(mode);
       await saveTurn(sessionId, "user", q || "");
@@ -380,7 +406,9 @@ export default async function handler(req, res) {
       return res.status(200).json({ answer: msg, citations: [], mode, bot: BOT_NAME });
     }
 
-    // ── 2) RAG path
+    // 2) Category intent (broad ask) → lexical fallback context first
+    const cat = detectCategoryIntent(q);
+
     if (!VECTORS.length) {
       const msg = "Embeddings not loaded on server. Add data/index.json (npm run embed) and redeploy.";
       await saveTurn(sessionId, "user", q || ""); await saveTurn(sessionId, "assistant", msg);
@@ -399,27 +427,38 @@ export default async function handler(req, res) {
     } catch (e) {
       console.error("Embedding error:", e?.message || e);
     }
-    if (!qVec.length) {
-      const msg = "Sorry, I couldn’t process that just now. Please try again.";
-      await saveTurn(sessionId, "user", q || ""); await saveTurn(sessionId, "assistant", msg);
-      return res.status(200).json({ answer: msg, citations: [], mode, bot: BOT_NAME });
+
+    // If we have a category intent, build a lexical candidate set right away.
+    let catCandidates = [];
+    if (cat) {
+      catCandidates = lexicalTop(VECTORS, CATEGORY_DEFS[cat].kw, TOP_K * 2);
     }
 
-    // Hybrid retrieval
-    const HYBRID_BONUS = 0.12;
-    const candidates = VECTORS.map(v => {
-      const cos = cosineSim(qVec, v.embedding);
-      const kw  = kwScoreFor(v, kwList);
-      const score = cos + (kw > 0 ? HYBRID_BONUS * Math.min(kw, 3) : 0);
-      return { ...v, score, cos, kw };
-    }).sort((a,b)=>b.score-a.score).slice(0, TOP_K);
+    // Hybrid retrieval (cosine + entity bonus)
+    let hybridCandidates = [];
+    if (qVec.length) {
+      const HYBRID_BONUS = 0.12;
+      hybridCandidates = VECTORS.map(v => {
+        const cos = cosineSim(qVec, v.embedding);
+        const kw  = kwScoreFor(v, kwList);
+        const score = cos + (kw > 0 ? HYBRID_BONUS * Math.min(kw, 3) : 0);
+        return { ...v, score, cos, kw };
+      }).sort((a,b)=>b.score-a.score).slice(0, TOP_K);
+    }
 
+    // Merge candidates: prefer hybrid if strong, otherwise lexical
+    let candidates = hybridCandidates;
     const topHit = candidates[0];
     const modelFoundInTop = stickyEntities.length>0 && candidates.some(c => {
       const txt=(c.text_original||c.text_cleaned||c.text||"").toLowerCase();
       return stickyEntities.some(m => txt.includes(m));
     });
-    const passable = (topHit?.score ?? 0) >= (MIN_OK_SCORE - 0.04) || modelFoundInTop;
+    let passable = (topHit?.score ?? 0) >= (MIN_OK_SCORE - 0.04) || modelFoundInTop;
+
+    if (!passable && catCandidates.length) {
+      candidates = catCandidates.slice(0, TOP_K);
+      passable = candidates.length > 0;
+    }
 
     if (!passable) {
       const tip = mode === "hinglish"
@@ -433,8 +472,9 @@ export default async function handler(req, res) {
     const context = candidates.map((s,i)=>`【${i+1}】 ${s.text_original || s.text_cleaned || s.text}`).join("\n\n");
     const recentChat = history.slice(-6).map(h => (h.role==="user"?`User: ${h.text}`:`Assistant: ${h.text}`)).join("\n");
 
-    // Strict contact rule remains for non-contact queries
     const languageGuide = mode==="hinglish" ? `REPLY LANGUAGE: Hinglish (Hindi in Latin script). Do NOT use Devanagari.` : `REPLY LANGUAGE: English. Professional and concise.`;
+
+    const catHint = cat ? CATEGORY_DEFS[cat].promptHint : "";
     const systemInstruction = `
 You are ${BOT_NAME}, Dukejia’s assistant.
 Answer STRICTLY and ONLY from the provided CONTEXT.
@@ -445,10 +485,10 @@ ${CONTACT_CACHE.email}"
 Rules:
 - Do not invent or add external knowledge.
 - Be concise and factual.
-- Prefer details about these STICKY ENTITIES if present: ${stickyEntities.join(", ") || "none"}.
 - Use recent chat for continuity if it helps resolve the user’s intent.
-- Do NOT include contact details unless the answer is not present in CONTEXT (unless the user explicitly asked for contact, which is handled separately before this step).
+- Do NOT include contact details unless the answer is not present in CONTEXT (explicit contact requests are handled before this step).
 - ${languageGuide}
+${cat ? `- The user intent category is **${cat}**. Hint: ${catHint}` : ""}
 `.trim();
 
     const prompt = `
@@ -481,7 +521,7 @@ ${CONTACT_CACHE.email}”
     if (containsContact && contextLooksNonEmpty) {
       text = mode==="hinglish"
         ? "Mujhe context mein exact details nahi mili. Agar aap model/feature thoda aur specific batayenge to main exact specs dikha sakta hoon."
-        : "I didn’t see the exact details in the context. If you specify the model/feature a bit more, I can pull precise specs.";
+        : `Please contact our sales team at \nWhatsapp: ${CONTACT_CACHE.whatsapp} \n${CONTACT_CACHE.email}`;
     }
     if (!text) {
       text = contextLooksNonEmpty
@@ -496,7 +536,7 @@ ${CONTACT_CACHE.email}”
       answer: text,
       mode,
       bot: BOT_NAME,
-      citations: candidates.map((s,i)=>({ idx:i+1, score:Number(s.score.toFixed(4)), kw:s.kw, cos:Number(s.cos.toFixed(4)) })),
+      citations: candidates.map((s,i)=>({ idx:i+1, score: Number((s.score ?? s.lex ?? 0).toFixed(4)), kw: s.kw, cos: s.cos != null ? Number(s.cos.toFixed(4)) : undefined })),
     });
   } catch (err) {
     console.error("ask error:", err);
