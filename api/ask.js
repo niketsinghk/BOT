@@ -182,39 +182,8 @@ function formatMachineResponse(rawText) {
 
   const area = rawText.match(/(\d{2,4}\s?[×x]\s?\d{2,4})/);
   const headNeedle = rawText.match(/(\d+)\s?(head|heads).+?(\d+)\s?(needle|needles)/i);
-
-  if (isEmb) {
-    return `
-**${model} — Embroidery Machine**
-
-**Description:** ${rawText.split(".")[0]}
-`;
   }
 
-  if (isQuilt) {
-    return `
-**${model} — Quilting Machine**
-
-**Description:** ${rawText.split(".")[0]}
-
-**Application:**
-• Pattern stitching for quilts, mattress covers, and layered fabrics
-`;
-  }
-
-  if (isPerf) {
-    return `
-**${model} — Perforation / Stitching Machine**
-
-**Description:** ${rawText.split(".")[0]}
-
-**Application:**
-• Leather, foam, or technical textiles needing punching + stitching precision
-`;
-  }
-
-  return rawText;
-}
 
 /* ────────────────── Point-wise Output Normalizer ────────────────── */
 function hasList(text) {
