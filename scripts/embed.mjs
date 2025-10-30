@@ -65,11 +65,12 @@ if (process.env.PDF_PATHS) {
   if (CANDIDATE_PDFS.length === 0) {
     CANDIDATE_PDFS = [
       resolveToRoot("./data/Question.pdf"),   // 👈 default new file
-        resolveToRoot("./data/knowledge.pdf"),
           resolveToRoot("./data/contact.pdf"),
             resolveToRoot("./data/Query.pdf"),
               resolveToRoot("./data/UserQuery.pdf"),
-            resolveToRoot("./data/Difference.pdf")
+                resolveToRoot("./data/knowledge.pdf"),
+                resolveToRoot("./data/Difference.pdf"),
+                resolveToRoot("./data/Question.pdf"),
 
     ];
   }

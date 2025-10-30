@@ -188,13 +188,6 @@ function formatMachineResponse(rawText) {
 **${model} — Embroidery Machine**
 
 **Description:** ${rawText.split(".")[0]}
-
-**Configuration:**
-• ${headNeedle ? `${headNeedle[1]} Heads, ${headNeedle[3]} Needles` : "Head & needle info on request"}  
-• ${area ? `Embroidery Area: ${area[0]} mm` : "Embroidery area available on request"}
-
-**Next:**
-• Say “show features” or “full specs” for details
 `;
   }
 
@@ -206,9 +199,6 @@ function formatMachineResponse(rawText) {
 
 **Application:**
 • Pattern stitching for quilts, mattress covers, and layered fabrics
-
-**Next:**
-• Say “show features” or “full specs” for details
 `;
   }
 
@@ -220,9 +210,6 @@ function formatMachineResponse(rawText) {
 
 **Application:**
 • Leather, foam, or technical textiles needing punching + stitching precision
-
-**Next:**
-• Say “show features” or “full specs” for details
 `;
   }
 
