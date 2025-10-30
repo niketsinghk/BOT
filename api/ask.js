@@ -1,4 +1,4 @@
-// api/ask.js — continuity (optional Redis via lazy import) + dynamic-entity hybrid RAG + strict fallback
+// api/ask.js — continuity (optional Redis) + dynamic-entity hybrid RAG + strict fallback + resilient Gemini retries
 import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -9,6 +9,7 @@ const EMB_PATH = path.join(DATA_DIR, "index.json");
 
 const TOP_K            = parseInt(process.env.TOP_K || "6", 10);
 const GENERATION_MODEL = process.env.GENERATION_MODEL || "gemini-2.5-flash";
+const FALLBACK_MODEL   = process.env.FALLBACK_MODEL   || "gemini-1.5-flash";
 const EMBEDDING_MODEL  = process.env.EMBEDDING_MODEL  || "text-embedding-004";
 const MIN_OK_SCORE     = parseFloat(process.env.MIN_OK_SCORE || "0.16");
 
@@ -19,8 +20,8 @@ if (!process.env.GOOGLE_API_KEY) throw new Error("Missing GOOGLE_API_KEY env on 
 
 /* ─────────────────────────── Google Gemini SDK ───────────────────────── */
 const genAI    = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+let   llm      = genAI.getGenerativeModel({ model: GENERATION_MODEL });
 const embedder = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
-const llm      = genAI.getGenerativeModel({ model: GENERATION_MODEL });
 
 /* ───────── Optional Redis (lazy import so missing pkg won’t crash) ───── */
 const SESSION_TTL = parseInt(process.env.SESSION_TTL_SECONDS || "3600", 10);
@@ -203,6 +204,58 @@ function handleSmallTalkAll(q,{isFirstTurn=false}={}){
   return null;
 }
 
+/* ──────────────── Gemini guarded call (retry + model fallback) ─────────────── */
+async function tryGeminiText(prompt, opts = {}) {
+  const {
+    retries = 2,
+    backoffMs = 1200, // initial wait
+    modelFallback = FALLBACK_MODEL
+  } = opts;
+
+  let lastErr;
+  for (let i = 0; i < Math.max(1, retries); i++) {
+    try {
+      const res = await llm.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+      const txt = res?.response?.text?.() || "";
+      if (txt) return txt;
+      throw new Error("Empty response from model");
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e?.message || e);
+      const isOverload = msg.includes("503") || msg.toLowerCase().includes("overloaded") || msg.toLowerCase().includes("service unavailable");
+      const isQuota    = msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("api key");
+
+      // One-time model fallback if first attempt fails
+      if (i === 0 && modelFallback && GENERATION_MODEL !== modelFallback) {
+        console.warn("Switching to fallback model:", modelFallback);
+        llm = genAI.getGenerativeModel({ model: modelFallback });
+        // immediate retry with fallback
+        continue;
+      }
+
+      // Retry on overload with exponential-ish backoff
+      if (isOverload && i < retries - 1) {
+        const wait = backoffMs * (i + 1);
+        console.warn(`Gemini overloaded — retrying in ${wait}ms`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+
+      // Non-retryable or out of attempts
+      if (isQuota) {
+        return "There seems to be a temporary issue with my AI engine. Please try again shortly.";
+      }
+      if (isOverload) {
+        return "Server is a bit busy right now ⏳ — please try again in a few seconds.";
+      }
+      return "Sorry, I ran into a technical issue fetching that. Please try again.";
+    }
+  }
+  // If loop exits without return:
+  console.error("Gemini final error:", lastErr?.message || lastErr);
+  return "Sorry, I ran into a technical issue fetching that. Please try again.";
+}
+
 /* ───────────────────────────── Handler ───────────────────────────────── */
 export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
@@ -247,10 +300,21 @@ export default async function handler(req, res) {
     const stickyEntities = extractEntities(q, history);
     const kwList = [...stickyEntities];
 
-    const embRes = await embedder.embedContent({ content: { parts: [{ text: cleaned }] } });
-    const qVec = embRes?.embedding?.values || embRes?.embeddings?.[0]?.values || [];
-    if (!qVec.length) { const msg="Embedding failed"; await saveTurn(sessionId,"user",q||""); await saveTurn(sessionId,"assistant",msg); return res.status(500).json({ error: msg }); }
+    // Embedding (light guard)
+    let qVec = [];
+    try {
+      const embRes = await embedder.embedContent({ content: { parts: [{ text: cleaned }] } });
+      qVec = embRes?.embedding?.values || embRes?.embeddings?.[0]?.values || [];
+    } catch (e) {
+      console.error("Embedding error:", e?.message || e);
+    }
+    if (!qVec.length) {
+      const msg = "Sorry, I couldn’t process that just now. Please try again.";
+      await saveTurn(sessionId, "user", q || ""); await saveTurn(sessionId, "assistant", msg);
+      return res.status(200).json({ answer: msg, citations: [], mode, bot: BOT_NAME });
+    }
 
+    // Hybrid retrieval
     const HYBRID_BONUS = 0.12;
     const candidates = VECTORS.map(v => {
       const cos = cosineSim(qVec, v.embedding);
@@ -259,6 +323,7 @@ export default async function handler(req, res) {
       return { ...v, score, cos, kw };
     }).sort((a,b)=>b.score-a.score).slice(0, TOP_K);
 
+    // Entity lock & passability
     const topHit = candidates[0];
     const modelFoundInTop = stickyEntities.length>0 && candidates.some(c => {
       const txt=(c.text_original||c.text_cleaned||c.text||"").toLowerCase();
@@ -274,9 +339,11 @@ export default async function handler(req, res) {
       return res.status(200).json({ answer: tip, citations: [], mode, bot: BOT_NAME });
     }
 
+    // Build context + recent chat
     const context = candidates.map((s,i)=>`【${i+1}】 ${s.text_original || s.text_cleaned || s.text}`).join("\n\n");
     const recentChat = history.slice(-6).map(h => (h.role==="user"?`User: ${h.text}`:`Assistant: ${h.text}`)).join("\n");
 
+    // System guardrails — STRICT: only show contact if truly not in context
     const languageGuide = mode==="hinglish" ? `REPLY LANGUAGE: Hinglish (Hindi in Latin script). Do NOT use Devanagari.` : `REPLY LANGUAGE: English. Professional and concise.`;
     const systemInstruction = `
 You are ${BOT_NAME}, Dukejia’s assistant.
@@ -314,9 +381,10 @@ Embroidery@grouphca.com”
 - Use the reply language specified above.
 `.trim();
 
-    const result = await llm.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-    let text = result?.response?.text?.() || "";
+    // ── Robust call with retry/fallback
+    let text = await tryGeminiText(prompt, { retries: 2, backoffMs: 1200, modelFallback: FALLBACK_MODEL });
 
+    // Final safety: block premature contact drop if we actually had passable context
     const contactLine = "Please contact our sales team";
     const containsContact = text.includes(contactLine);
     const contextLooksNonEmpty = Boolean(context && context.trim().length > 0);
