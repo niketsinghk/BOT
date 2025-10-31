@@ -69,9 +69,9 @@ if (process.env.PDF_PATHS) {
             resolveToRoot("./data/Query.pdf"),
               resolveToRoot("./data/UserQuery.pdf"),
                 resolveToRoot("./data/knowledge.pdf"),
-                resolveToRoot("./data/Difference.pdf"),
                 resolveToRoot("./data/Question.pdf"),
                 resolveToRoot("./data/embroidery.pdf"),
+                resolveToRoot("./data/Difference.pdf"),
 
     ];
   }
