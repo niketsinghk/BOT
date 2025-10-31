@@ -457,7 +457,7 @@ export default async function handler(req, res) {
     if (!passable) {
       const tip = mode === "hinglish"
         ? "Is topic par Dukejia knowledge base mein clear info nahi mil rahi. Thoda specific likhiye—jaise 'DY-CS3000 specs' ya '1206H applications'."
-        : "I couldn’t find clear context in the Dukejia knowledge base for that. Try being more specific—for example, 'DY-CS3000 specs' or '1206H applications'.";
+        : `Please contact our sales team at \nWhatsapp: ${CONTACT_CACHE.whatsapp} \n${CONTACT_CACHE.email}`;
       await saveTurn(sessionId,"user",q||""); await saveTurn(sessionId,"assistant",tip);
       return res.status(200).json({ answer: tip, citations: [], mode, bot: BOT_NAME });
     }
