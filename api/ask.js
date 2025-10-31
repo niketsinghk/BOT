@@ -149,17 +149,13 @@ function contactReply(mode = "english") {
   const lines = [
     "Here are our contact details:",
     `• WhatsApp: ${CONTACT_CACHE.whatsapp}`,
-    `• Phone: ${CONTACT_CACHE.phone}`,
     `• Email: ${CONTACT_CACHE.email}`,
-    `• ${CONTACT_CACHE.address}`,
   ];
   if (mode === "hinglish") {
     return [
       "Yeh rahe hamare contact details:",
       `• WhatsApp: ${CONTACT_CACHE.whatsapp}`,
-      `• Phone: ${CONTACT_CACHE.phone}`,
       `• Email: ${CONTACT_CACHE.email}`,
-      `• ${CONTACT_CACHE.address}`,
     ].join("\n");
   }
   return lines.join("\n");
