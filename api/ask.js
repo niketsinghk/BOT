@@ -19,8 +19,6 @@ const FRONTEND_GREETS = (process.env.FRONTEND_GREETS ?? "true") !== "false";
 // Contact fallbacks
 const CONTACT_WHATSAPP = process.env.CONTACT_WHATSAPP || "+91 9350513789";
 const CONTACT_EMAIL    = process.env.CONTACT_EMAIL    || "Embroidery@grouphca.com";
-const CONTACT_PHONE    = process.env.CONTACT_PHONE    || "+91 9350513789";
-const CONTACT_HO_ADDR  = process.env.CONTACT_HO_ADDR  || "Head Office: HCA, New Delhi, India";
 
 if (!process.env.GOOGLE_API_KEY) throw new Error("Missing GOOGLE_API_KEY env on Vercel");
 
