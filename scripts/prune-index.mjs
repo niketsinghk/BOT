@@ -5,7 +5,7 @@ import path from "node:path";
 // Names must match the `source` field stored in vectors (usually the PDF filename)
 const SOURCES_TO_REMOVE = [
   // e.g. "HCA.pdf", "model_list.pdf"
-  "Difference.pdf"
+  "area.pdf"
 ];
 
 const DATA_DIR  = path.resolve(process.cwd(), "..", "data");

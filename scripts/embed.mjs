@@ -74,6 +74,7 @@ if (process.env.PDF_PATHS) {
                 resolveToRoot("./data/Difference.pdf"),
                 resolveToRoot("./data/area.pdf"),
 
+
     ];
   }
 }
