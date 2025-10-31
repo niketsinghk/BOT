@@ -167,7 +167,7 @@ let MODEL_ALIASES = new Map();
 let MODEL_INIT_DONE = false;
 function normModelToken(s=""){return s.toLowerCase().replace(/\s+/g,"").replace(/_/g,"-").replace(/–/g,"-").replace(/[()]+/g,"").replace(/[^a-z0-9.+-]/g,"").replace(/^-+|-+$/g,"");}
 const GENERIC_MODEL_RE = /\b([a-z]{1,6}[\w.+-]*\d[\w.+-]*|[a-z]*\d[\w.+-]{1,15})\b/gi;
-const LIKELY_PREFIX = /^(dy|dukejia|duke|cs|sk|pe|halo|es|tajima|highlead|juki|dyk|dy\-|dy_)/i;
+const LIKELY_PREFIX = /^(dy|dukejia|duke|cs|sk|pe|halo|es|dyk|dy\-|dy_)/i;
 
 function initModelIndexOnce(){
   if (MODEL_INIT_DONE) return; MODEL_INIT_DONE = true;
@@ -234,7 +234,7 @@ function kwScoreFor(v, kwList){
 /* ───────────── Category Intent + Lexical Fallback (for broad asks) ───── */
 const CATEGORY_DEFS = {
   embroidery: {
-    kw: ["embroidery", "embroidery machine", "single head", "multi head", "dukejia", "dy-"],
+    kw: ["embroidery", "embroidery machine", "single head", "multi head", "dukejia", "dy-","Duke"],
     promptHint: "Embroidery machines overview, use specs/features if present.",
   },
   perforation: {

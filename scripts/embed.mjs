@@ -75,6 +75,7 @@ if (process.env.PDF_PATHS) {
                 resolveToRoot("./data/area.pdf"),
 
 
+
     ];
   }
 }
