@@ -474,7 +474,7 @@ You are ${BOT_NAME}, Dukejia’s assistant.
 Answer STRICTLY and ONLY from the provided CONTEXT.
 If the requested details are clearly NOT present in CONTEXT, reply exactly:
 "Please contact our sales team at 
-${CONTACT_CACHE.whatsapp} 
+Whatsapp: ${CONTACT_CACHE.whatsapp} 
 ${CONTACT_CACHE.email}"
 Rules:
 - Do not invent or add external knowledge.
@@ -500,7 +500,7 @@ ${context}
 Format:
 - Direct answer grounded in CONTEXT (bullets/tables ok).
 - If NOT found in CONTEXT: “Please contact our sales team at 
-${CONTACT_CACHE.whatsapp} 
+Whatsapp: ${CONTACT_CACHE.whatsapp} 
 ${CONTACT_CACHE.email}”
 - Use the reply language specified above.
 `.trim();
@@ -515,12 +515,12 @@ ${CONTACT_CACHE.email}”
     if (containsContact && contextLooksNonEmpty) {
       text = mode==="hinglish"
         ? "Mujhe context mein exact details nahi mili. Agar aap model/feature thoda aur specific batayenge to main exact specs dikha sakta hoon."
-        : `Please contact our sales team at \n: ${CONTACT_CACHE.whatsapp} \n${CONTACT_CACHE.email}`;
+        : `Please contact our sales team at \nWhatsapp: ${CONTACT_CACHE.whatsapp} \n${CONTACT_CACHE.email}`;
     }
     if (!text) {
       text = contextLooksNonEmpty
         ? (mode==="hinglish" ? "Main context se details nikal raha hoon—please model/feature thoda aur specific batayein." : "I’m using the knowledge base—please specify the model/feature you need.")
-        : `Please contact our sales team at \n: ${CONTACT_CACHE.whatsapp} \n${CONTACT_CACHE.email}`;
+        : `Please contact our sales team at \nWhatsapp: ${CONTACT_CACHE.whatsapp} \n${CONTACT_CACHE.email}`;
     }
 
     await saveTurn(sessionId,"user",q||"");
