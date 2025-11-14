@@ -1,17 +1,21 @@
 // api/ask.js — Duki: DukeJia assistant
-// Features:
-// - Contact intent + category intent (lexical fallback)
-// - Optional Redis history
-// - Dynamic-entity hybrid RAG
-// - Strict fallback to contact details
-// - JSON user memory (memory.json)
-// - /history, /debug_memory, /reset_memory, "remember ..." command
-// - Multi-turn enriched query (follow-ups use previous model)
-// - Extended small-talk: "who are you", "about yourself", "about DukeJia", etc.
+// - Small talk + "who are you / about yourself / about DukeJia"
+// - Contact intent + category intent (embroidery / quilting / perforation / pattern)
+// - Hybrid RAG retrieval from data/index.json
+// - Optional Redis history (Upstash) for multi-turn
+// - Local JSON user memory (data/memory.json)
+// - /history, /debug_memory, /reset_memory, "remember ..." support
 
 import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+
+/* ─────────────────────────── Shared Sessions Map ─────────────────────────── */
+// Shared in-memory session map (same pattern as /api/session.js)
+const SESSIONS =
+  globalThis.__DUKEJIA_SESSIONS__ ??
+  globalThis.__HCA_SESSIONS__ ??
+  (globalThis.__DUKEJIA_SESSIONS__ = new Map());
 
 /* ─────────────────────────── Paths & Config ─────────────────────────── */
 const DATA_DIR    = path.join(process.cwd(), "data");
@@ -22,7 +26,7 @@ const TOP_K            = parseInt(process.env.TOP_K || "6", 10);
 const GENERATION_MODEL = process.env.GENERATION_MODEL || "gemini-2.5-flash";
 const FALLBACK_MODEL   = process.env.FALLBACK_MODEL   || "gemini-1.5-flash";
 const EMBEDDING_MODEL  = process.env.EMBEDDING_MODEL  || "text-embedding-004";
-const MIN_OK_SCORE     = parseFloat(process.env.MIN_OK_SCORE || "0.16"); // You can relax to 0.10 if needed
+const MIN_OK_SCORE     = parseFloat(process.env.MIN_OK_SCORE || "0.16"); // relax to 0.10 if needed
 
 const BOT_NAME        = process.env.BOT_NAME || "Duki";
 const FRONTEND_GREETS = (process.env.FRONTEND_GREETS ?? "true") !== "false";
@@ -40,10 +44,10 @@ const genAI    = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 let   llm      = genAI.getGenerativeModel({ model: GENERATION_MODEL });
 const embedder = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
 
-/* ───────── Optional Redis (lazy import so missing pkg won’t crash) ───── */
+/* ───────── Optional Redis (lazy import, safe if missing) ───── */
 const SESSION_TTL = parseInt(process.env.SESSION_TTL_SECONDS || "3600", 10);
 const WANT_REDIS  = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
-let redisClient = null;
+let redisClient   = null;
 
 async function getRedis() {
   if (!WANT_REDIS) return null;
@@ -62,27 +66,58 @@ async function getRedis() {
 }
 
 function getSessionId(req) {
-  const h = req.headers["x-session-id"] || req.headers["x-sessionid"] || req.headers["x-client-session"];
+  const h  = req.headers["x-session-id"] || req.headers["x-sessionid"] || req.headers["x-client-session"];
   if (h) return String(h).slice(0, 100);
   const ck = (req.headers.cookie || "").match(/sid=([^;]+)/)?.[1];
   if (ck) return ck.slice(0, 100);
-  return (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "anon") + ":" + (req.headers["user-agent"] || "");
+  return (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "anon") +
+         ":" + (req.headers["user-agent"] || "");
 }
 
 async function loadHistory(sessionId, k = 10) {
   const redis = await getRedis();
-  if (!redis) return [];
-  const key  = `duki:chat:${sessionId}`;
-  const rows = await redis.lrange(key, -k, -1);
-  return rows?.map(r => JSON.parse(r)) || [];
+  if (redis) {
+    const key  = `duki:chat:${sessionId}`;
+    const rows = await redis.lrange(key, -k, -1);
+    return rows?.map(r => JSON.parse(r)) || [];
+  }
+
+  // Fallback: in-memory SESSIONS map (same data /api/session.js reads)
+  const sess    = SESSIONS.get(String(sessionId)) || {};
+  const history = Array.isArray(sess.history) ? sess.history : [];
+  return history.slice(-k);
 }
 
 async function saveTurn(sessionId, role, text) {
+  const ts    = Date.now();
+  const entry = { ts, role, text };
+
+  // 1) Redis (if configured)
   const redis = await getRedis();
-  if (!redis) return;
-  const key = `duki:chat:${sessionId}`;
-  await redis.rpush(key, JSON.stringify({ ts: Date.now(), role, text }));
-  await redis.expire(key, SESSION_TTL);
+  if (redis) {
+    const key = `duki:chat:${sessionId}`;
+    await redis.rpush(key, JSON.stringify(entry));
+    await redis.expire(key, SESSION_TTL);
+  }
+
+  // 2) In-memory SESSIONS map (for /api/session, and non-Redis setups)
+  const sid  = String(sessionId);
+  const sess = SESSIONS.get(sid) || {
+    createdAt: ts,
+    history:   [],
+    hits:      0,
+    lastSeen:  null,
+  };
+
+  sess.history.push(entry);
+  if (sess.history.length > 100) {
+    // keep last 100 messages
+    sess.history = sess.history.slice(-100);
+  }
+  sess.hits     = (sess.hits || 0) + 1;
+  sess.lastSeen = ts;
+
+  SESSIONS.set(sid, sess);
 }
 
 /* ───────────────────────── JSON USER MEMORY (local file) ─────────────── */
@@ -616,7 +651,7 @@ function smallTalkMatch(q) {
       re: /^(bye|bb|good\s*bye|goodbye|see\s*ya|see\s*you|take\s*care|tc|ciao|gn)\b/i,
     },
     {
-      // Any “about you / about Duki / about DukeJia / what can you do” type question
+      // “about you / about Duki / about DukeJia / what can you do”
       kind: "help",
       re: /(who\s*are\s*you|what\s*can\s*you\s*do|help|menu|options|how\s*to\s*use|about\s+yourself|about\s+you|introduce\s+yourself|tell\s+me\s+about\s+yourself|what\s+is\s+duki|who\s+made\s+you|who\s+is\s+duki|about\s+dukejia|tell\s+me\s+about\s+dukejia|what\s+is\s+dukejia|about\s+your\s+company|about\s+duke\s+sewing|who\s+are\s+you\s+duki)/i,
     },
@@ -767,11 +802,10 @@ export default async function handler(req, res) {
     const sessionId = getSessionId(req);
     const history   = await loadHistory(sessionId, 10);
 
-    // userId for persistent memory (can be overridden by frontend)
     const userId     = body.userId ? String(body.userId) : sessionId;
     const userMemory = getUserMemory(userId);
 
-    /* ───── Chat history commands: /history & natural-language ───── */
+    /* ───── Chat history commands: /history & NL ───── */
     const historyCommand =
       /^\/(history|show_history|previous_chat)\b/i.test(q) ||
       /\b(show|give|see)\s+(my\s+)?(previous|old|last)\s+(chat|conversation)\b/i.test(q) ||
@@ -830,7 +864,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ answer: msg, citations: [], mode, bot: BOT_NAME });
     }
 
-    // Explicit "remember ..." command → store memory + short ack
     const memCmd = parseExplicitMemoryCommand(q || "");
     if (memCmd) {
       addUserMemoryFact(userId, { ...memCmd, source: "user_message" });
@@ -850,7 +883,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ answer: st.text, citations: [], mode, bot: BOT_NAME });
     }
 
-    /* ───── 1) Explicit CONTACT intent → reply immediately (no LLM) ───── */
+    /* ───── 1) Explicit CONTACT intent → reply immediately ───── */
     if (isContactIntent(q)) {
       const msg = contactReply(mode);
       await saveTurn(sessionId, "user", q || "");
@@ -858,7 +891,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ answer: msg, citations: [], mode, bot: BOT_NAME });
     }
 
-    /* ───── 2) Category intent (broad ask) → lexical fallback context first ───── */
+    /* ───── 2) Category intent (broad ask) ───── */
     const cat = detectCategoryIntent(q);
 
     if (!VECTORS.length) {
@@ -868,31 +901,23 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: msg });
     }
 
-    // Extract sticky entities (e.g., model names like ES-1300, DY-PE750×600)
-    // from current message + recent history.
+    // Sticky entities (model names, etc.)
     const stickyEntities = extractEntities(q, history);
 
-    // Also pull in a short window of recent chat to help with follow-up questions
-    // like "what is the specification", "price?", "applications?" etc.
+    // Short recent chat window to help follow-ups like "specification of this model"
     let followContext = "";
     if (history && history.length) {
       const recentTurns = history.slice(-4);
       followContext = recentTurns.map(h => h.text || "").join(" ");
     }
 
-    // Use entities + recent chat as a hint in the embedding query so that
-    // follow-ups still carry over the relevant model/context.
     const entityHint    = stickyEntities.length ? (" " + stickyEntities.join(" ")) : "";
     const enrichedQuery = [q, entityHint, followContext].join(" ").trim();
 
-    // Use enriched query for embedding so the model sees something like
-    // "what is the specification ... Our flagship model is Duke Jia DY-PE750×600 ..."
     const cleaned = cleanForEmbedding(enrichedQuery) || enrichedQuery.toLowerCase();
+    const kwList  = [...stickyEntities];
 
-    // Keywords for hybrid scoring
-    const kwList = [...stickyEntities];
-
-    // Embedding guard
+    // Embedding
     let qVec = [];
     try {
       const embRes = await embedder.embedContent({
@@ -903,13 +928,13 @@ export default async function handler(req, res) {
       console.error("Embedding error:", e?.message || e);
     }
 
-    // If we have a category intent, build a lexical candidate set right away.
+    // Category lexical
     let catCandidates = [];
     if (cat) {
       catCandidates = lexicalTop(VECTORS, CATEGORY_DEFS[cat].kw, TOP_K * 2);
     }
 
-    // Hybrid retrieval (cosine + entity bonus)
+    // Hybrid retrieval (cos + entity bonus)
     let hybridCandidates = [];
     if (qVec.length) {
       const HYBRID_BONUS = 0.12;
@@ -923,9 +948,8 @@ export default async function handler(req, res) {
         .slice(0, TOP_K);
     }
 
-    // Merge candidates: prefer hybrid if strong, otherwise lexical
-    let candidates     = hybridCandidates;
-    const topHit       = candidates[0];
+    let candidates       = hybridCandidates;
+    const topHit         = candidates[0];
     const modelFoundInTop = stickyEntities.length > 0 && candidates.some(c => {
       const txt = (c.text_original || c.text_cleaned || c.text || "").toLowerCase();
       return stickyEntities.some(m => txt.includes(m));
@@ -941,13 +965,12 @@ export default async function handler(req, res) {
     if (!passable) {
       const tip = mode === "hinglish"
         ? "Is topic par DukeJia knowledge base mein clear info nahi mil rahi. Thoda specific likhiye—jaise 'DY-CS3000 specs' ya '1206H applications'."
-        : `Please contact our sales team at \nWhatsapp: ${CONTACT_CACHE.whatsapp} \n${CONTACT_CACHE.email}`;
+        : "I couldn’t find an exact answer in the DukeJia knowledge base for this question. Please ask again with the full model name, e.g. 'specification of DY-PE750×600'.";
       await saveTurn(sessionId, "user", q || "");
       await saveTurn(sessionId, "assistant", tip);
       return res.status(200).json({ answer: tip, citations: [], mode, bot: BOT_NAME });
     }
 
-    // Build context + recent chat + user memory
     const context = candidates
       .map((s, i) => `【${i + 1}】 ${s.text_original || s.text_cleaned || s.text}`)
       .join("\n\n");
@@ -1007,14 +1030,12 @@ ${CONTACT_CACHE.email}”
 - Use the reply language specified above.
 `.trim();
 
-    // Robust model call
     let text = await tryGeminiText(prompt, {
       retries: 2,
       backoffMs: 1200,
       modelFallback: FALLBACK_MODEL,
     });
 
-    // Safety: block premature contact drop if we had passable context
     const contactLine          = "Please contact our sales team";
     const containsContact      = text.includes(contactLine);
     const contextLooksNonEmpty = Boolean(context && context.trim().length > 0);

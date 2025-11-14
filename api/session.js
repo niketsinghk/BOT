@@ -1,4 +1,12 @@
-// /api/session.js — Vercel serverless (Node.js runtime)
+// /api/session.js — Debug / inspection endpoint for Duki sessions
+// Shows what the server remembers for a given sessionId.
+//
+// Notes:
+// - Shares the same in-memory SESSIONS map as /api/ask.js
+// - If you're also using Redis for long-term history, this endpoint
+//   will still show the in-process snapshot (what this cold-start
+//   instance has seen so far).
+
 export const config = { runtime: "nodejs" };
 
 // Shared in-memory map per cold start (serverless-safe).
@@ -13,13 +21,20 @@ const BOT_NAME = process.env.BOT_NAME || "Duki";
 export default async function handler(req, res) {
   /* ---------- CORS + preflight ---------- */
   const origin = req.headers.origin || "*";
+
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Session-ID");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, X-Session-ID, X-SessionID, X-Client-Session"
+  );
   res.setHeader("Cache-Control", "no-store");
 
-  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   if (req.method !== "GET") {
     res.setHeader("Allow", ["GET", "OPTIONS"]);
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
@@ -32,14 +47,23 @@ export default async function handler(req, res) {
     cookie.match(/(?:^|;\s*)dukejia_sid=([^;]+)/)?.[1] ||
     cookie.match(/(?:^|;\s*)hca_sid=([^;]+)/)?.[1];
 
-  const sid =
+  const headerSid =
     req.headers["x-session-id"] ||
-    cookieSid ||
-    "anon";
+    req.headers["x-sessionid"] ||
+    req.headers["x-client-session"];
 
-  /* ---------- Read session safely ---------- */
+  const sid = headerSid || cookieSid || "anon";
+
+  /* ---------- Read session safely from SESSIONS map ---------- */
   const sess = SESSIONS.get(String(sid)) || {};
   const history = Array.isArray(sess.history) ? sess.history : [];
+
+  // Optional: short preview of first few messages (to eyeball quickly)
+  const preview = history.slice(-5).map((m) => ({
+    ts: m.ts,
+    role: m.role,
+    text: typeof m.text === "string" ? m.text.slice(0, 200) : m.text,
+  }));
 
   /* ---------- Response ---------- */
   return res.status(200).json({
@@ -48,6 +72,7 @@ export default async function handler(req, res) {
     sessionId: String(sid),
     historyLength: history.length || 0,
     messages: history,
+    preview, // last few turns, truncated text
     createdAt: sess.createdAt || null,
     lastSeen: sess.lastSeen || null,
     hits: sess.hits || 0,
