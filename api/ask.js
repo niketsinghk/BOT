@@ -1,6 +1,13 @@
-// api/ask.js — contact intent + category intent (lexical fallback) + optional Redis
-// + dynamic-entity hybrid RAG + strict fallback + resilient Gemini retries
-// + JSON user memory + /history command + enriched query for follow-ups
+// api/ask.js — Duki: DukeJia assistant
+// Features:
+// - Contact intent + category intent (lexical fallback)
+// - Optional Redis history
+// - Dynamic-entity hybrid RAG
+// - Strict fallback to contact details
+// - JSON user memory (memory.json)
+// - /history, /debug_memory, /reset_memory, "remember ..." command
+// - Multi-turn enriched query (follow-ups use previous model)
+// - Extended small-talk: "who are you", "about yourself", "about DukeJia", etc.
 
 import fs from "fs";
 import path from "path";
@@ -15,7 +22,7 @@ const TOP_K            = parseInt(process.env.TOP_K || "6", 10);
 const GENERATION_MODEL = process.env.GENERATION_MODEL || "gemini-2.5-flash";
 const FALLBACK_MODEL   = process.env.FALLBACK_MODEL   || "gemini-1.5-flash";
 const EMBEDDING_MODEL  = process.env.EMBEDDING_MODEL  || "text-embedding-004";
-const MIN_OK_SCORE     = parseFloat(process.env.MIN_OK_SCORE || "0.16"); // you can relax to 0.10 if needed
+const MIN_OK_SCORE     = parseFloat(process.env.MIN_OK_SCORE || "0.16"); // You can relax to 0.10 if needed
 
 const BOT_NAME        = process.env.BOT_NAME || "Duki";
 const FRONTEND_GREETS = (process.env.FRONTEND_GREETS ?? "true") !== "false";
@@ -24,7 +31,7 @@ const FRONTEND_GREETS = (process.env.FRONTEND_GREETS ?? "true") !== "false";
 const CONTACT_WHATSAPP = process.env.CONTACT_WHATSAPP || "+91 9350513789";
 const CONTACT_EMAIL    = process.env.CONTACT_EMAIL    || "Embroidery@grouphca.com";
 const CONTACT_PHONE    = process.env.CONTACT_PHONE    || CONTACT_WHATSAPP;
-
+const CONTACT_HO_ADDR  = process.env.CONTACT_HO_ADDR  || null;
 
 if (!process.env.GOOGLE_API_KEY) throw new Error("Missing GOOGLE_API_KEY env on Vercel");
 
@@ -284,7 +291,7 @@ const CONTACT_CACHE = { whatsapp: null, phone: null, email: null, address: null 
   if (!CONTACT_CACHE.whatsapp) CONTACT_CACHE.whatsapp = CONTACT_WHATSAPP;
   if (!CONTACT_CACHE.phone)    CONTACT_CACHE.phone    = CONTACT_PHONE;
   if (!CONTACT_CACHE.email)    CONTACT_CACHE.email    = CONTACT_EMAIL;
- 
+  if (!CONTACT_CACHE.address)  CONTACT_CACHE.address  = CONTACT_HO_ADDR;
 })();
 
 /* ────────── Contact Intent Detector (explicit requests only) ────────── */
@@ -457,7 +464,7 @@ function kwScoreFor(v, kwList) {
 
 const CATEGORY_DEFS = {
   embroidery: {
-    kw: ["embroidery", "embroidery machine", "single head", "multi head", "dukejia", "dy-", "Duke"],
+    kw: ["embroidery", "embroidery machine", "single head", "multi head", "dukejia", "dy-", "duke"],
     promptHint: "Embroidery machines overview, use specs/features if present.",
   },
   perforation: {
@@ -509,7 +516,7 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/* ─────────────────────── Small-talk (same as before) ─────────────────── */
+/* ─────────────────────── Small-talk / About Duki ─────────────────────── */
 
 function getISTGreeting(now = new Date()) {
   const hour = Number(
@@ -540,7 +547,10 @@ function makeSmallTalkReply(kind, mode) {
     evening:   ["Good evening! Need help with machines or spares?"],
     thanks:    ["You’re welcome! Anything else I can do?", "Happy to help! Need brochures or a sales connect?"],
     bye:       ["Take care! I’m here if you need me.", "Bye! Have a great day."],
-    help:      ["I’m Duki, here to help you explore DukeJia embroidery, perforation, quilting, and automation machines."],
+    help: [
+      "I’m Duki, the virtual assistant for DukeJia (part of the HCA Group). I help you explore our embroidery, perforation, quilting and automation machines—specs, applications, comparisons, and who to contact.",
+      "I’m Duki, here to guide you through DukeJia machines: single-head, multi-head, perforation, quilting and more. Ask me about models, specs, applications or which machine fits your work."
+    ],
     ack:       ["Got it! What would you like next?"],
   };
 
@@ -551,7 +561,10 @@ function makeSmallTalkReply(kind, mode) {
     evening:   ["Good evening! Machines/spares par madad chahiye to batayein."],
     thanks:    ["Shukriya! Aur kuch chahiye to pooch lijiye.", "Welcome ji! Brochure chahiye ya sales connect karu?"],
     bye:       ["Theek hai, milte hain! Jab chahein ping kar dijiyega.", "Bye! Din shubh rahe."],
-    help:      ["Try: “Flagship features”, “Application-wise machine suggestion”, “Spares info”."],
+    help: [
+      "Main Duki hoon, DukeJia (HCA Group) ka virtual assistant. Main aapko embroidery, perforation, quilting aur automation machines ke baare mein guide karta hoon—specs, applications, comparison aur kisko contact karna hai.",
+      "Main Duki hoon 👋 DukeJia ke single-head, multi-head, perforation aur quilting machines ke baare mein puchhiye—model, specification, kis kaam ke liye best hai, sab bataunga."
+    ],
     ack:       ["Thik hai! Ab kya puchhna hai?"],
   };
 
@@ -574,14 +587,39 @@ function makeSmallTalkReply(kind, mode) {
 function smallTalkMatch(q) {
   const t = (q || "").trim();
   const patterns = [
-    { kind: "hello",    re: /^(hi+|h[iy]+|hello+|hey( there)?|hlo+|yo+|hola|namaste|namaskar|salaam|salam|👋|🙏)\b/i },
-    { kind: "morning",  re: /^(good\s*morning|gm)\b/i },
-    { kind: "afternoon",re: /^(good\s*afternoon|ga)\b/i },
-    { kind: "evening",  re: /^(good\s*evening|ge)\b/i },
-    { kind: "ack",      re: /^(ok+|okay+|okk+|hmm+|haan+|ha+|sure|done|great|nice|cool|perfect|thik|theek|fine)\b/i },
-    { kind: "thanks",   re: /^(thanks|thank\s*you|thx|tnx|ty|much\s*(appreciated|thanks)|appreciate(d)?|shukriya|dhanyavaad|dhanyavad)\b/i },
-    { kind: "bye",      re: /^(bye|bb|good\s*bye|goodbye|see\s*ya|see\s*you|take\s*care|tc|ciao|gn)\b/i },
-    { kind: "help",     re: /(who\s*are\s*you|what\s*can\s*you\s*do|help|menu|options|how\s*to\s*use)\b/i },
+    {
+      kind: "hello",
+      re: /^(hi+|h[iy]+|hello+|hey( there)?|hlo+|yo+|hola|namaste|namaskar|salaam|salam|👋|🙏)\b/i,
+    },
+    {
+      kind: "morning",
+      re: /^(good\s*morning|gm)\b/i,
+    },
+    {
+      kind: "afternoon",
+      re: /^(good\s*afternoon|ga)\b/i,
+    },
+    {
+      kind: "evening",
+      re: /^(good\s*evening|ge)\b/i,
+    },
+    {
+      kind: "ack",
+      re: /^(ok+|okay+|okk+|hmm+|haan+|ha+|sure|done|great|nice|cool|perfect|thik|theek|fine)\b/i,
+    },
+    {
+      kind: "thanks",
+      re: /^(thanks|thank\s*you|thx|tnx|ty|much\s*(appreciated|thanks)|appreciate(d)?|shukriya|dhanyavaad|dhanyavad)\b/i,
+    },
+    {
+      kind: "bye",
+      re: /^(bye|bb|good\s*bye|goodbye|see\s*ya|see\s*you|take\s*care|tc|ciao|gn)\b/i,
+    },
+    {
+      // Any “about you / about Duki / about DukeJia / what can you do” type question
+      kind: "help",
+      re: /(who\s*are\s*you|what\s*can\s*you\s*do|help|menu|options|how\s*to\s*use|about\s+yourself|about\s+you|introduce\s+yourself|tell\s+me\s+about\s+yourself|what\s+is\s+duki|who\s+made\s+you|who\s+is\s+duki|about\s+dukejia|tell\s+me\s+about\s+dukejia|what\s+is\s+dukejia|about\s+your\s+company|about\s+duke\s+sewing|who\s+are\s+you\s+duki)/i,
+    },
   ];
   for (const r of patterns) if (r.re.test(t)) return r.kind;
   return null;
@@ -804,7 +842,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ answer: ack, citations: [], mode, bot: BOT_NAME });
     }
 
-    /* ───── 0) Small talk ───── */
+    /* ───── 0) Small talk (incl. 'about yourself', 'who are you') ───── */
     const st = handleSmallTalkAll(q, { isFirstTurn });
     if (st && st.text) {
       await saveTurn(sessionId, "user", q || "");
@@ -830,15 +868,25 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: msg });
     }
 
-    // Extract sticky entities (e.g., model names like ES-1300) from current
-    // message + recent history, so follow-ups like "provide specification"
-    // still carry over the model name.
+    // Extract sticky entities (e.g., model names like ES-1300, DY-PE750×600)
+    // from current message + recent history.
     const stickyEntities = extractEntities(q, history);
 
-    const entityHint    = stickyEntities.length ? (" " + stickyEntities.join(" ")) : "";
-    const enrichedQuery = q + entityHint;
+    // Also pull in a short window of recent chat to help with follow-up questions
+    // like "what is the specification", "price?", "applications?" etc.
+    let followContext = "";
+    if (history && history.length) {
+      const recentTurns = history.slice(-4);
+      followContext = recentTurns.map(h => h.text || "").join(" ");
+    }
 
-    // Use enriched query for embedding so the model sees "provide specification es1300"
+    // Use entities + recent chat as a hint in the embedding query so that
+    // follow-ups still carry over the relevant model/context.
+    const entityHint    = stickyEntities.length ? (" " + stickyEntities.join(" ")) : "";
+    const enrichedQuery = [q, entityHint, followContext].join(" ").trim();
+
+    // Use enriched query for embedding so the model sees something like
+    // "what is the specification ... Our flagship model is Duke Jia DY-PE750×600 ..."
     const cleaned = cleanForEmbedding(enrichedQuery) || enrichedQuery.toLowerCase();
 
     // Keywords for hybrid scoring
